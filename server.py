@@ -1,26 +1,24 @@
-from tempfile import NamedTemporaryFile
-from dataclasses import dataclass, field
-import threading
-from typing import Any
 import io
 import os
 import sys
 import json
 import socket
 import signal
+import threading
+import logging
+from tempfile import NamedTemporaryFile
+from dataclasses import dataclass, field
+from typing import Any
 from datetime import datetime
-from scapy.all import sniff, wrpcap, Ether, IP, UDP, TCP, srp, ARP
-from config import SERVER_PORT, CREDENTIAL_PATH, BUCKET_NAME, BUFFER_SIZE, INTERFACE, NETWORK_RANGE, BROADCAST_MAC, PACKETS_PER_FILE
 from target_manager import TargetManager
 from configparser import ConfigParser
-from google.cloud import storage
-
-import logging
+# from google.cloud import storage
 from traffic_logger import logger_setup
+from scapy.all import sniff, wrpcap, Ether, raw,  IP, UDP, TCP, srp, ARP
+from config import SERVER_PORT, BUFFER_SIZE, INTERFACE, PACKETS_PER_FILE, TRAFFIC_DIRECTORY
 
 logger_setup()
 logger = logging.getLogger(__name__)
-
 
 
 @dataclass
@@ -33,35 +31,8 @@ class Server:
     running: bool = True
     pkt_count: int = 0
 
-    @staticmethod
-    def get_ip_by_mac(mac_address):
-        """
-        Discover the IP address associated with a given MAC address using ARP requests.
-
-        This static method sends an ARP (Address Resolution Protocol) request to the specified MAC address
-        within the given network range. It then processes the ARP responses, if any, to extract and return
-        the corresponding IP address.
-
-        Parameters:
-        - mac_address (str): The MAC address for which the IP address is to be discovered.
-        """
-        try:
-            arp_request = Ether(dst=BROADCAST_MAC) / ARP(pdst=NETWORK_RANGE, hwdst=mac_address)
-            arp_response = srp(arp_request, timeout=1, verbose=0)
-
-            if arp_response:
-                for packet in arp_response:
-                    response_ip = packet[ARP].psrc
-                    logger.info(f"Found IP {response_ip} for MAC {mac_address}")
-                    return response_ip
-            else:
-                logger.warning(f"No ARP response for MAC {mac_address}")
-
-        except Exception as exception:
-            logger.error(f"Error getting IP from MAC: {exception}")
-
-        return None
-
+    def write(self, packet, mac_address):
+        wrpcap(f'{TRAFFIC_DIRECTORY}/target{self.target_manager.macs[mac_address]}.pcap', packet, append = True)
 
     def packet_handler(self, packet):
         """
@@ -90,66 +61,16 @@ class Server:
 
         if packet.haslayer(IP) and (packet.haslayer(UDP) or packet.haslayer(TCP)):
             source_mac, source_ip = packet[Ether].src, packet[IP].src
-            data_dict = {source_mac: source_ip}
-
             with self.target_manager.lock:
                 if source_mac in self.target_manager.macs and self.pkt_count < int(PACKETS_PER_FILE):
-                    datetime_now = datetime.now()
-                    datetime_directory = datetime_now.strftime("%Y-%m-%d")
-                    logger.info("Received packet data:", data_dict)
-
-                    self.upload_packet_to_cloud_storage(packet, source_mac, datetime_directory)
-
+                    logger.info(f"Received packet data: {source_mac}")
+                    self.write(packet, source_mac)
                     self.pkt_count += 1
                 
 
-    def upload_packet_to_cloud_storage(self, packet, source_mac, datetime_directory):
-        """
-        Uploads network packet data to cloud storage.
-
-        This method uploads the provided network packet data to a cloud storage bucket.
-        It creates a temporary PCAP file, writes the packet data to the file, reads the file
-        content, and uploads it to the specified blob in the cloud storage bucket.
-
-        Parameters:
-        - packet: The network packet data to be uploaded.
-        - source_mac: The source MAC address associated with the packet.
-        - datetime_directory: The directory structure for organizing the cloud storage data.
-
-        Returns:
-        - None
-
-        Behavior:
-        1. Creates a temporary PCAP file using the NamedTemporaryFile context manager.
-        2. Writes the provided network packet data to the temporary PCAP file.
-        3. Reads the content of the temporary PCAP file.
-        4. Uploads the packet data to the specified blob in the cloud storage bucket.
-        """
-        try:
-            storage_client = storage.Client.from_service_account_json(CREDENTIAL_PATH)
-            bucket = storage_client.get_bucket(BUCKET_NAME)
-
-            with NamedTemporaryFile(delete=False, suffix=".pcap") as temp_file:
-                temp_filename = temp_file.name
-                temp_file.close()  
-
-                wrpcap(temp_filename, [packet]) 
-
-                with open(temp_filename, "rb") as file:
-                    packet_bytes = file.read()
-
-                blob_name = f"{source_mac}/{datetime_directory}/{datetime.now()}.pcap"
-                blob = bucket.blob(blob_name)
-                blob.upload_from_string(packet_bytes, content_type='application/octet-stream')
-
-                logger.info(f"Uploaded packet data to {blob_name}")
-
-        except Exception as e:
-            logger.error(f"Error uploading packet data: {e}")
-
-
     def sniff_packets(self):
         sniff(prn=self.packet_handler, store=0, iface=INTERFACE)
+        
         """
         Sniff network packets and handle them using the specified packet_handler.
         """
@@ -224,9 +145,7 @@ class Server:
         sniff_thread = threading.Thread(target=self.sniff_packets)
         sniff_thread.daemon = True
         sniff_thread.start()
-
-        # logger.info("testing server and Sniffer threads")
-
+        
         try:
             server_thread.join()
             sniff_thread.join()

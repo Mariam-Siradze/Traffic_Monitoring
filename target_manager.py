@@ -1,4 +1,5 @@
 import os
+import shutil
 import threading
 from dataclasses import dataclass, field
 from config import TRAFFIC_DIRECTORY
@@ -20,9 +21,14 @@ class TargetManager:
         get_targets() -> List[str]: Get a list of current target MAC addresses.
     """
 
-    macs: set = field(default_factory=set)
-    mac_directories: dict = field(default_factory=dict)
+    macs: dict = field(default_factory=dict)
+    mac_dir: str = os.path.join(os.getcwd(), TRAFFIC_DIRECTORY)
     lock: threading.Lock = field(default_factory=threading.Lock)
+    target_count: int = 0
+
+    def __post_init__(self):
+        if os.path.isdir(self.mac_dir):
+            shutil.rmtree(self.mac_dir)
 
     def add_target(self, mac: str) -> str:
         """
@@ -32,14 +38,13 @@ class TargetManager:
             mac (str): The MAC address to be added.
 
         Returns:
-            str: A message indicating the success or failure of the operation.
+            str: A message indicating the success or failure of the operation.                                                                                                      
         """
         with self.lock:
             if mac not in self.macs:
-                self.macs.add(mac)
-                mac_directory = os.path.join(TRAFFIC_DIRECTORY)
-                os.makedirs(mac_directory, exist_ok=True)
-                self.mac_directories[mac] = mac_directory
+                self.target_count += 1
+                self.macs[mac] = self.target_count
+                os.makedirs(self.mac_dir, exist_ok=True)
                 return f"MAC {mac} successfully added."
             else:
                 return f"MAC {mac} already exists."
@@ -56,8 +61,8 @@ class TargetManager:
         """
         with self.lock:
             if mac in self.macs:
-                self.macs.remove(mac)
-                self.mac_directories.pop(mac)
+                os.remove(f'{self.mac_dir}/target{self.macs[mac]}.pcap')
+                self.macs.pop(mac)
                 return f"MAC {mac} successfully removed."
             else:
                 return f"MAC {mac} not found in the list."
